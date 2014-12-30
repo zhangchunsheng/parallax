@@ -1,15 +1,21 @@
 /**
- * jQuery/Zepto Parallax Plugin
- * @author Matthew Wagerfield - @mwagerfield
+ * jQuery || Zepto Parallax Plugin
+ * @author Matthew Wagerfield - @wagerfield
  * @description Creates a parallax effect between an array of layers,
  *              driving the motion from the gyroscope output of a smartdevice.
  *              If no gyroscope is available, the cursor position is used.
  */
 ;(function($, window, document, undefined) {
 
+  // Strict Mode
+  'use strict';
+
+  // Constants
   var NAME = 'parallax';
   var MAGIC_NUMBER = 30;
   var DEFAULTS = {
+    relativeInput: false,
+    clipRelativeInput: false,
     calibrationThreshold: 100,
     calibrationDelay: 500,
     supportDelay: 500,
@@ -22,7 +28,9 @@
     scalarX: 10.0,
     scalarY: 10.0,
     frictionX: 0.1,
-    frictionY: 0.1
+    frictionY: 0.1,
+    originX: 0.5,
+    originY: 0.5
   };
 
   function Plugin(element, options) {
@@ -45,7 +53,9 @@
       scalarX: parseFloat(this.$context.data('scalar-x')) || null,
       scalarY: parseFloat(this.$context.data('scalar-y')) || null,
       frictionX: parseFloat(this.$context.data('friction-x')) || null,
-      frictionY: parseFloat(this.$context.data('friction-y')) || null
+      frictionY: parseFloat(this.$context.data('friction-y')) || null,
+      originX: parseFloat(this.$context.data('origin-x')) || null,
+      originY: parseFloat(this.$context.data('origin-y')) || null
     };
 
     // Delete Null Data Values
@@ -63,11 +73,20 @@
     this.depths = [];
     this.raf = null;
 
-    // Offset
-    this.ox = 0;
-    this.oy = 0;
-    this.ow = 0;
-    this.oh = 0;
+    // Element Bounds
+    this.bounds = null;
+    this.ex = 0;
+    this.ey = 0;
+    this.ew = 0;
+    this.eh = 0;
+
+    // Element Center
+    this.ecx = 0;
+    this.ecy = 0;
+
+    // Element Range
+    this.erx = 0;
+    this.ery = 0;
 
     // Calibration
     this.cx = 0;
@@ -123,11 +142,21 @@
         break;
       case '3D':
         if (propertySupport) {
-          document.body.appendChild(element);
+          var body = document.body || document.createElement('body');
+          var documentElement = document.documentElement;
+          var documentOverflow = documentElement.style.overflow;
+          if (!document.body) {
+            documentElement.style.overflow = 'hidden';
+            documentElement.appendChild(body);
+            body.style.overflow = 'hidden';
+            body.style.background = '';
+          }
+          body.appendChild(element);
           element.style[jsProperty] = 'translate3d(1px,1px,1px)';
           propertyValue = window.getComputedStyle(element).getPropertyValue(cssProperty);
           featureSupport = propertyValue !== undefined && propertyValue.length > 0 && propertyValue !== "none";
-          document.body.removeChild(element);
+          documentElement.style.overflow = documentOverflow;
+          body.removeChild(element);
         }
         break;
     }
@@ -136,8 +165,10 @@
 
   Plugin.prototype.ww = null;
   Plugin.prototype.wh = null;
-  Plugin.prototype.hw = null;
-  Plugin.prototype.hh = null;
+  Plugin.prototype.wcx = null;
+  Plugin.prototype.wcy = null;
+  Plugin.prototype.wrx = null;
+  Plugin.prototype.wry = null;
   Plugin.prototype.portrait = null;
   Plugin.prototype.desktop = !navigator.userAgent.match(/(iPhone|iPod|iPad|Android|BlackBerry|BB10|mobi|tablet|opera mini|nexus 7)/i);
   Plugin.prototype.vendors = [null,['-webkit-','webkit'],['-moz-','Moz'],['-o-','O'],['-ms-','ms']];
@@ -146,6 +177,7 @@
   Plugin.prototype.orientationStatus = 0;
   Plugin.prototype.transform2DSupport = Plugin.prototype.transformSupport('2D');
   Plugin.prototype.transform3DSupport = Plugin.prototype.transformSupport('3D');
+  Plugin.prototype.propertyCache = {};
 
   Plugin.prototype.initialise = function() {
 
@@ -155,11 +187,27 @@
         position:'relative'
       });
     }
+
+    // Hardware Accelerate Context
+    this.accelerate(this.$context);
+
+    // Setup
+    this.updateLayers();
+    this.updateDimensions();
+    this.enable();
+    this.queueCalibration(this.calibrationDelay);
+  };
+
+  Plugin.prototype.updateLayers = function() {
+
+    // Cache Layer Elements
+    this.$layers = this.$context.find('.layer');
+    this.depths = [];
+
+    // Configure Layer Styles
     this.$layers.css({
       position:'absolute',
       display:'block',
-      height:'100%',
-      width:'100%',
       left: 0,
       top: 0
     });
@@ -167,34 +215,34 @@
       position:'relative'
     });
 
+    // Hardware Accelerate Layers
+    this.accelerate(this.$layers);
+
     // Cache Depths
     this.$layers.each($.proxy(function(index, element) {
       this.depths.push($(element).data('depth') || 0);
     }, this));
-
-    // Hardware Accelerate Elements
-    this.accelerate(this.$context);
-    this.accelerate(this.$layers);
-
-    // Setup
-    this.updateDimensions();
-    this.enable();
-    this.queueCalibration(this.calibrationDelay);
   };
 
   Plugin.prototype.updateDimensions = function() {
-
-    // Cache Context Dimensions
-    this.ox = this.$context.offset().left;
-    this.oy = this.$context.offset().top;
-    this.ow = this.$context.width();
-    this.oh = this.$context.height();
-
-    // Cache Window Dimensions
     this.ww = window.innerWidth;
     this.wh = window.innerHeight;
-    this.hw = this.ww / 2;
-    this.hh = this.wh / 2;
+    this.wcx = this.ww * this.originX;
+    this.wcy = this.wh * this.originY;
+    this.wrx = Math.max(this.wcx, this.ww - this.wcx);
+    this.wry = Math.max(this.wcy, this.wh - this.wcy);
+  };
+
+  Plugin.prototype.updateBounds = function() {
+    this.bounds = this.element.getBoundingClientRect();
+    this.ex = this.bounds.left;
+    this.ey = this.bounds.top;
+    this.ew = this.bounds.width;
+    this.eh = this.bounds.height;
+    this.ecx = this.ew * this.originX;
+    this.ecy = this.eh * this.originY;
+    this.erx = Math.max(this.ecx, this.ew - this.ecx);
+    this.ery = Math.max(this.ecy, this.eh - this.ecy);
   };
 
   Plugin.prototype.queueCalibration = function(delay) {
@@ -258,6 +306,11 @@
     this.limitY = y === undefined ? this.limitY : y;
   };
 
+  Plugin.prototype.origin = function(x, y) {
+    this.originX = x === undefined ? this.originX : x;
+    this.originY = y === undefined ? this.originY : y;
+  };
+
   Plugin.prototype.clamp = function(value, min, max) {
     value = Math.max(value, min);
     value = Math.min(value, max);
@@ -265,18 +318,21 @@
   };
 
   Plugin.prototype.css = function(element, property, value) {
-    var jsProperty = null;
-    for (var i = 0, l = this.vendors.length; i < l; i++) {
-      if (this.vendors[i] !== null) {
-        jsProperty = $.camelCase(this.vendors[i][1] + '-' + property);
-      } else {
-        jsProperty = property;
-      }
-      if (element.style[jsProperty] !== undefined) {
-        element.style[jsProperty] = value;
-        break;
+    var jsProperty = this.propertyCache[property];
+    if (!jsProperty) {
+      for (var i = 0, l = this.vendors.length; i < l; i++) {
+        if (this.vendors[i] !== null) {
+          jsProperty = $.camelCase(this.vendors[i][1] + '-' + property);
+        } else {
+          jsProperty = property;
+        }
+        if (element.style[jsProperty] !== undefined) {
+          this.propertyCache[property] = jsProperty;
+          break;
+        }
       }
     }
+    element.style[jsProperty] = value;
   };
 
   Plugin.prototype.accelerate = function($element) {
@@ -289,8 +345,8 @@
   };
 
   Plugin.prototype.setPosition = function(element, x, y) {
-    x += '%';
-    y += '%';
+    x += 'px';
+    y += 'px';
     if (this.transform3DSupport) {
       this.css(element, 'transform', 'translate3d('+x+','+y+',0)');
     } else if (this.transform2DSupport) {
@@ -318,18 +374,21 @@
   };
 
   Plugin.prototype.onAnimationFrame = function() {
+    this.updateBounds();
     var dx = this.ix - this.cx;
     var dy = this.iy - this.cy;
     if ((Math.abs(dx) > this.calibrationThreshold) || (Math.abs(dy) > this.calibrationThreshold)) {
       this.queueCalibration(0);
     }
     if (this.portrait) {
-      this.mx = (this.calibrateX ? dy : this.iy) * this.scalarX;
-      this.my = (this.calibrateY ? dx : this.ix) * this.scalarY;
+      this.mx = this.calibrateX ? dy : this.iy;
+      this.my = this.calibrateY ? dx : this.ix;
     } else {
-      this.mx = (this.calibrateX ? dx : this.ix) * this.scalarX;
-      this.my = (this.calibrateY ? dy : this.iy) * this.scalarY;
+      this.mx = this.calibrateX ? dx : this.ix;
+      this.my = this.calibrateY ? dy : this.iy;
     }
+    this.mx *= this.ew * (this.scalarX / 100);
+    this.my *= this.eh * (this.scalarY / 100);
     if (!isNaN(parseFloat(this.limitX))) {
       this.mx = this.clamp(this.mx, -this.limitX, this.limitX);
     }
@@ -382,19 +441,43 @@
 
   Plugin.prototype.onMouseMove = function(event) {
 
-    // Calculate Input
-    this.ix = (event.pageX - this.hw) / this.hw;
-    this.iy = (event.pageY - this.hh) / this.hh;
+    // Cache mouse coordinates.
+    var clientX = event.clientX;
+    var clientY = event.clientY;
+
+    // Calculate Mouse Input
+    if (!this.orientationSupport && this.relativeInput) {
+
+      // Clip mouse coordinates inside element bounds.
+      if (this.clipRelativeInput) {
+        clientX = Math.max(clientX, this.ex);
+        clientX = Math.min(clientX, this.ex + this.ew);
+        clientY = Math.max(clientY, this.ey);
+        clientY = Math.min(clientY, this.ey + this.eh);
+      }
+
+      // Calculate input relative to the element.
+      this.ix = (clientX - this.ex - this.ecx) / this.erx;
+      this.iy = (clientY - this.ey - this.ecy) / this.ery;
+
+    } else {
+
+      // Calculate input relative to the window.
+      this.ix = (clientX - this.wcx) / this.wrx;
+      this.iy = (clientY - this.wcy) / this.wry;
+    }
   };
 
   var API = {
     enable: Plugin.prototype.enable,
     disable: Plugin.prototype.disable,
+    updateLayers: Plugin.prototype.updateLayers,
     calibrate: Plugin.prototype.calibrate,
     friction: Plugin.prototype.friction,
     invert: Plugin.prototype.invert,
     scalar: Plugin.prototype.scalar,
-    limit: Plugin.prototype.limit
+    limit: Plugin.prototype.limit,
+    origin: Plugin.prototype.origin
   };
 
   $.fn[NAME] = function (value) {
